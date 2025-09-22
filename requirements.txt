@@ -1,0 +1,17 @@
+fastapifastapi
+
+uvicorn[standard]uvicorn[standard]
+
+pydanticpydantic
+
+python-dotenvpython-dotenv
+
+earthengine-apiearthengine-api
+
+requestsrequests
+
+fastkmlfastkml
+
+shapelyshapely
+
+python-multipartpython-multipart
