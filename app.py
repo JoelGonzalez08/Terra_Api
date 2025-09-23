@@ -214,6 +214,7 @@ def make_roi_from_geojson(geometry):
     return ee.Geometry(geometry)
 
 def make_roi(lon, lat, width_m, height_m):
+    """Versión que solo retorna la geometría (para compatibilidad)"""
     return ee.Geometry.Rectangle(meters_to_degrees(lon, lat, width_m, height_m))
 
 def ensure_outputs_dir():
@@ -457,6 +458,8 @@ def compute(req: ComputeRequest):
     """
     try:
         # Permitir ROI por GeoJSON o por lon/lat/width/height
+        roi_bounds = None  # Para almacenar coordenadas exactas del rectángulo
+        
         if req.geometry:
             roi = make_roi_from_geojson(req.geometry)
         else:
@@ -467,7 +470,11 @@ def compute(req: ComputeRequest):
                     missing.append(field)
             if missing:
                 raise HTTPException(status_code=400, detail=f"Faltan los campos requeridos: {', '.join(missing)}")
-            roi = make_roi(req.lon, req.lat, req.width_m, req.height_m)
+            
+            # Obtener ROI y coordenadas exactas
+            roi_bounds = meters_to_degrees(req.lon, req.lat, req.width_m, req.height_m)
+            roi = ee.Geometry.Rectangle(roi_bounds)
+            
         # Validar que roi sea un ee.Geometry válido antes de convertir a GeoJSON
         if not isinstance(roi, ee.Geometry):
             raise HTTPException(status_code=500, detail="No se pudo construir la geometría del área de interés (ROI)")
@@ -529,6 +536,7 @@ def compute(req: ComputeRequest):
                 return ComputeResponse(
                     mode=req.mode, index=req.index,
                     roi=roi.getInfo(),
+                    roi_bounds=roi_bounds,
                     tileUrlTemplate=m['tile_fetcher'].url_format,
                     vis=vis
                 )
@@ -558,11 +566,20 @@ def compute(req: ComputeRequest):
                 
                 logging.info(f"Series temporal: {len(series_data)} imágenes individuales de Sentinel-2")
                 
+                # Convertir a formato TimePoint para Pydantic
+                time_points = []
+                for point in series_data:
+                    time_points.append({
+                        "date": point["date"],
+                        "value": point["mean"]
+                    })
+                
                 return ComputeResponse(
                     mode=req.mode, 
                     index=req.index,
                     roi=roi.getInfo(),
-                    series=series_data
+                    roi_bounds=roi_bounds,
+                    series=time_points
                 )
                 
             except Exception as e:
@@ -651,6 +668,7 @@ def compute(req: ComputeRequest):
             return ComputeResponse(
                 mode=req.mode, index=req.index,
                 roi=roi.getInfo(),
+                roi_bounds=roi_bounds,
                 saved_files={'geotiff': str(geotiff_path), 'csv': str(csv_path)}
             )
 

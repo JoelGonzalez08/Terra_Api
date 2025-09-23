@@ -534,53 +534,62 @@ def get_sentinel2_time_series(roi, start, end, index, cloud_pct=70):
     try:
         print("Procesando estadísticas con método optimizado...")
         
-        # Método optimizado: usar map() en lugar de bucle individual
-        def extract_stats_optimized(img):
-            stats = img.select(index).reduceRegion(
-                reducer=ee.Reducer.mean(),
-                geometry=roi,
-                scale=60,  # Escalas más grandes = más rápido
-                maxPixels=1e5,  # Menos píxeles = más rápido
-                bestEffort=True
-            )
-            
-            return ee.Feature(None, {
-                'date': ee.Date(img.get('system:time_start')).format('YYYY-MM-dd'),
-                'timestamp': img.get('system:time_start'),
-                'mean': stats.get(index),
-                'cloud_cover': img.get('CLOUDY_PIXEL_PERCENTAGE'),
-                'satellite': 'Sentinel-2'
-            })
-        
-        # Limitar a máximo 50 imágenes para velocidad
-        limited_collection = processed_collection.limit(50)
+        # Método simplificado: procesar imagen por imagen
+        limited_collection = processed_collection.limit(30)  # Limitar para velocidad
         image_count = limited_collection.size().getInfo()
         print(f"Procesando {image_count} imágenes (limitado para velocidad)...")
         
-        # Usar map() que es mucho más eficiente
-        features = limited_collection.map(extract_stats_optimized)
+        # Obtener lista de imágenes
+        image_list = limited_collection.toList(image_count)
         
-        # Obtener todos los datos de una vez
-        time_series_raw = features.aggregate_array('properties').getInfo()
-        print(f"Datos obtenidos: {len(time_series_raw)} elementos")
-        
-        # Filtrar y procesar resultados
         time_series = []
-        for point in time_series_raw:
-            if point.get('mean') is not None:
-                time_series.append({
-                    'date': point['date'],
-                    'datetime': point['date'] + ' 12:00:00',  # Hora simplificada
-                    'timestamp': point['timestamp'],
-                    'mean': float(point['mean']),
-                    'min': None,  # Omitir para velocidad
-                    'max': None,  # Omitir para velocidad
-                    'stdDev': None,  # Omitir para velocidad
-                    'cloud_cover': float(point['cloud_cover']) if point.get('cloud_cover') is not None else None,
-                    'satellite': 'Sentinel-2',
-                    'product_id': None,  # Omitir para velocidad
-                    'cloud_threshold_used': threshold
-                })
+        for i in range(image_count):
+            try:
+                img = ee.Image(image_list.get(i))
+                
+                # Obtener estadísticas directamente
+                stats = img.select(index).reduceRegion(
+                    reducer=ee.Reducer.mean(),
+                    geometry=roi,
+                    scale=60,
+                    maxPixels=1e5,
+                    bestEffort=True
+                ).getInfo()
+                
+                # Obtener metadatos
+                metadata = img.getInfo()
+                date_ms = metadata['properties']['system:time_start']
+                cloud_cover = metadata['properties'].get('CLOUDY_PIXEL_PERCENTAGE', None)
+                
+                # Convertir timestamp a fecha
+                import datetime
+                date_obj = datetime.datetime.fromtimestamp(date_ms / 1000)
+                date_str = date_obj.strftime('%Y-%m-%d')
+                
+                # Obtener valor del índice
+                mean_value = stats.get(index)
+                
+                if mean_value is not None:
+                    time_series.append({
+                        'date': date_str,
+                        'datetime': date_str + ' 12:00:00',
+                        'timestamp': date_ms,
+                        'mean': float(mean_value),
+                        'min': None,
+                        'max': None,
+                        'stdDev': None,
+                        'cloud_cover': float(cloud_cover) if cloud_cover is not None else None,
+                        'satellite': 'Sentinel-2',
+                        'product_id': None,
+                        'cloud_threshold_used': threshold
+                    })
+                    print(f"Procesada imagen {i+1}/{image_count}: {date_str}, {index}={mean_value:.4f}")
+                else:
+                    print(f"Imagen {i+1}/{image_count}: Sin datos válidos para {index}")
+                    
+            except Exception as e:
+                print(f"Error procesando imagen {i+1}: {str(e)}")
+                continue
         
         # Ordenar por fecha
         time_series.sort(key=lambda x: x.get('timestamp', 0))

@@ -43,6 +43,7 @@ class ComputeResponse(BaseModel):
     mode: Mode
     index: str
     roi: dict
+    roi_bounds: Optional[List[float]] = None  # [west, south, east, north] para rectángulos
     tileUrlTemplate: Optional[str] = None
     vis: Optional[dict] = None
     series: Optional[List[TimePoint]] = None
