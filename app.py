@@ -5,7 +5,10 @@ import time
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, status
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
+from auth_models import UserLoginRequest, UserLoginResponse, UserInfoResponse
+from auth_utils import authenticate_user, create_access_token, get_user_by_id
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any
 import ee
@@ -101,6 +104,25 @@ def index_band_and_vis(index):
         return (["A01", "A16", "A09"], {"min": 0, "max": 1})
 
 load_dotenv()
+
+# --- Auth config ---
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
+
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    from jose import JWTError, jwt
+    from auth_utils import SECRET_KEY, ALGORITHM
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    user = get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    return user
+
 app = FastAPI(title="GEE FastAPI")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -128,6 +150,30 @@ def _startup():
     init_ee()
     ensure_outputs_dir()
 
+# --- Login endpoint ---
+@app.post("/login", response_model=UserLoginResponse)
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = authenticate_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    access_token = create_access_token(data={"sub": user["id"]})
+    return UserLoginResponse(
+        id=user["id"],
+        username=user["username"],
+        role=user["role"],
+        access_token=access_token,
+        token_type="bearer"
+    )
+
+# --- User info endpoint ---
+@app.get("/user", response_model=UserInfoResponse)
+def get_user_info(current_user: dict = Depends(get_current_user)):
+    return UserInfoResponse(
+        id=current_user["id"],
+        username=current_user["username"],
+        role=current_user["role"]
+    )
+
 @app.get("/")
 def root():
     return {
@@ -135,16 +181,27 @@ def root():
         "status": "active",
         "available_analyses": [
             "rgb", "ndvi", "ndwi", "evi", "savi", "gci", "vegetation_health",
-            "water_detection", "urban_index", "soil_moisture", "change_detection"
+            "water_detection", "urban_index", "soil_moisture", "change_detection", "ndmi"
         ],
         "endpoints": {
             "/": "Información de la API",
+            "/login": "Autenticación de usuario (POST)",
+            "/user": "Información del usuario (GET - requiere token)",
             "/health": "Estado de la conexión con Earth Engine",
             "/upload-kml": "Subir archivo KML de parcelas (POST)",
             "/time-series": "Análisis de series temporales (POST)",
             "/compute": "Análisis de heatmaps y exports (POST)"
         },
-        "docs": "/docs"
+        "docs": "/docs",
+        "authentication": {
+            "required": True,
+            "method": "Bearer Token",
+            "demo_users": {
+                "admin": "admin123",
+                "cliente": "cliente123", 
+                "tecnico": "tecnico123"
+            }
+        }
     }
 
 @app.get("/health")
@@ -387,7 +444,7 @@ def compute(req: ComputeRequest):
         
         # Para análisis que requieren cálculos especiales
         if req.index in ["ndvi", "ndwi", "evi", "savi", "gci", "vegetation_health", 
-                        "water_detection", "urban_index", "soil_moisture", "change_detection"]:
+                        "water_detection", "urban_index", "soil_moisture", "change_detection", "ndmi"]:
             from ee_client import composite_embedding_with_analysis
             img = composite_embedding_with_analysis(roi, req.start, req.end, req.index)
             if img is None:
@@ -434,11 +491,11 @@ def compute(req: ComputeRequest):
             
             # Para análisis que requieren cálculos especiales
             if req.index in ["ndvi", "ndwi", "evi", "savi", "gci", "vegetation_health",
-                            "water_detection", "urban_index", "soil_moisture", "change_detection"]:
+                            "water_detection", "urban_index", "soil_moisture", "change_detection", "ndmi"]:
                 from ee_client import get_embedding_collection
                 from ee_client import (compute_ndvi_proxy, compute_ndwi_proxy, compute_evi_proxy, 
                                      compute_savi_proxy, compute_gci_proxy, compute_vegetation_health, compute_water_detection,
-                                     compute_urban_index, compute_soil_moisture, compute_change_detection)
+                                     compute_urban_index, compute_soil_moisture, compute_change_detection, compute_ndmi_proxy)
                 
                 col = get_embedding_collection(roi, req.start, req.end)
                 count_imgs = col.size().getInfo()
@@ -455,7 +512,8 @@ def compute(req: ComputeRequest):
                     "water_detection": compute_water_detection,
                     "urban_index": compute_urban_index,
                     "soil_moisture": compute_soil_moisture,
-                    "change_detection": compute_change_detection
+                    "change_detection": compute_change_detection,
+                    "ndmi": compute_ndmi_proxy
                 }
                 
                 processed_col = col.map(analysis_functions[req.index])
@@ -526,11 +584,11 @@ def compute(req: ComputeRequest):
 
             # 2) Serie temporal → CSV (fecha, mean, min, max)
             if req.index in ["ndvi", "ndwi", "evi", "savi", "gci", "vegetation_health",
-                            "water_detection", "urban_index", "soil_moisture", "change_detection"]:
+                            "water_detection", "urban_index", "soil_moisture", "change_detection", "ndmi"]:
                 from ee_client import get_embedding_collection
                 from ee_client import (compute_ndvi_proxy, compute_ndwi_proxy, compute_evi_proxy,
                                      compute_savi_proxy, compute_gci_proxy, compute_vegetation_health, compute_water_detection,
-                                     compute_urban_index, compute_soil_moisture, compute_change_detection)
+                                     compute_urban_index, compute_soil_moisture, compute_change_detection, compute_ndmi_proxy)
                 
                 col = get_embedding_collection(roi, req.start, req.end)
                 
@@ -545,7 +603,8 @@ def compute(req: ComputeRequest):
                     "water_detection": compute_water_detection,
                     "urban_index": compute_urban_index,
                     "soil_moisture": compute_soil_moisture,
-                    "change_detection": compute_change_detection
+                    "change_detection": compute_change_detection,
+                    "ndmi": compute_ndmi_proxy
                 }
                 
                 processed_col = col.map(analysis_functions[req.index])
