@@ -24,7 +24,8 @@ class TimeSeriesRequest(BaseModel):
     start: str   # "YYYY-MM-DD"
     end: str     # "YYYY-MM-DD"
     index: Literal["rgb", "ndvi", "ndwi", "evi", "savi", "gci", "vegetation_health", "water_detection", "urban_index", "soil_moisture", "change_detection", "ndmi"] = "rgb"
-    # No incluye mode ni cloud_pct ya que usa Sentinel-2 con máscara SCL automática
+    cloud_pct: Optional[int] = 80  # Para series temporales, más permisivo por defecto
+    fast_mode: Optional[bool] = True  # Modo rápido por defecto
 
 class KMLUploadResponse(BaseModel):
     success: bool

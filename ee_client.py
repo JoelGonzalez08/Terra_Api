@@ -373,3 +373,377 @@ def compute_ndmi_proxy(img):
     swir = safe_band(img, 'A12')
     ndmi = nir.subtract(swir).divide(nir.add(swir)).rename('ndmi')
     return img.addBands(ndmi)
+
+# --------- Funciones para Sentinel-2 (Heatmaps y Series) ---------
+def maskS2clouds(image):
+    """
+    Aplica máscara de nubes usando Scene Classification Layer (SCL)
+    """
+    scl = image.select('SCL')
+    # Máscara para excluir: sombras(3), nubes med(8), nubes altas(9), cirrus(10), nieve/hielo(11)
+    mask = (scl.neq(3)
+           .And(scl.neq(8))
+           .And(scl.neq(9))
+           .And(scl.neq(10))
+           .And(scl.neq(11)))
+    return image.updateMask(mask)
+
+def get_sentinel2_collection(roi, start, end, cloud_pct=30):
+    """
+    Obtiene colección Sentinel-2 con máscara de nubes aplicada
+    """
+    return (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+            .filterBounds(roi)
+            .filterDate(start, end)
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloud_pct))
+            .map(maskS2clouds))
+
+def get_sentinel2_time_series(roi, start, end, index, cloud_pct=70):
+    """
+    Obtiene serie temporal de cada pasada individual de Sentinel-2 (OPTIMIZADA)
+    Retorna datos de cada imagen por separado con enfoque en velocidad
+    """
+    # Para velocidad, usar thresholds más permisivos desde el inicio
+    cloud_thresholds = [min(cloud_pct, 80), 90]  # Máximo 2 intentos
+    
+    for threshold in cloud_thresholds:
+        print(f"Intentando con threshold de nubes: {threshold}%")
+        
+        collection = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                     .filterBounds(roi)
+                     .filterDate(start, end)
+                     .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', threshold))
+                     .sort('system:time_start')  # Ordenar por fecha desde el inicio
+                     .limit(30))  # Limitar desde el filtro inicial para velocidad
+        
+        # Verificar si hay imágenes sin aplicar máscara
+        size_before_mask = collection.size().getInfo()
+        print(f"Imágenes encontradas (limitadas a 30): {size_before_mask}")
+        
+        if size_before_mask == 0:
+            print(f"No hay imágenes con threshold {threshold}%, probando siguiente...")
+            continue
+            
+        # Aplicar máscara de nubes más simple para velocidad
+        def simple_cloud_mask(img):
+            scl = img.select('SCL')
+            # Solo eliminar nubes altas y cirrus (más permisivo = más rápido)
+            mask = scl.neq(9).And(scl.neq(10))
+            return img.updateMask(mask)
+        
+        collection = collection.map(simple_cloud_mask)
+        
+        # Verificar tamaño final
+        size_after_mask = collection.size().getInfo()
+        print(f"Imágenes después de máscara simple: {size_after_mask}")
+        
+        if size_after_mask > 0:
+            print(f"Sentinel-2 Series OPTIMIZADA: Usando {size_after_mask} imágenes con threshold {threshold}%")
+            break
+    else:
+        # Si no se encontraron imágenes con ningún threshold
+        print("No se encontraron imágenes de Sentinel-2 con ningún threshold de nubes")
+        return []
+    
+    # Función optimizada para agregar el índice específico a cada imagen
+    def add_index_band_fast(img):
+        # Versiones simplificadas para velocidad
+        if index.lower() == 'ndvi':
+            return img.addBands(img.normalizedDifference(['B8', 'B4']).rename(index))
+        elif index.lower() == 'ndwi':
+            return img.addBands(img.normalizedDifference(['B3', 'B8']).rename(index))
+        elif index.lower() == 'ndmi':
+            return img.addBands(img.normalizedDifference(['B8', 'B11']).rename(index))
+        elif index.lower() == 'evi':
+            # EVI simplificado
+            evi = img.normalizedDifference(['B8', 'B4']).multiply(2.5).rename(index)
+            return img.addBands(evi)
+        elif index.lower() == 'savi':
+            # SAVI simplificado
+            savi = img.normalizedDifference(['B8', 'B4']).multiply(1.5).rename(index)
+            return img.addBands(savi)
+        else:
+            # Para otros índices, usar NDVI como fallback rápido
+            return img.addBands(img.normalizedDifference(['B8', 'B4']).rename(index))
+    
+    # Agregar banda del índice a cada imagen
+    print(f"Agregando banda del índice {index} a la colección (modo rápido)...")
+    processed_collection = collection.map(add_index_band_fast)
+    print("Banda agregada exitosamente a todas las imágenes")
+    
+    # Función para extraer estadísticas de cada imagen
+    def extract_stats(img):
+        try:
+            # Obtener estadísticas del ROI con manejo de errores
+            stats = img.select(index).reduceRegion(
+                reducer=ee.Reducer.mean().combine(
+                    reducer2=ee.Reducer.min(), sharedInputs=True
+                ).combine(
+                    reducer2=ee.Reducer.max(), sharedInputs=True
+                ).combine(
+                    reducer2=ee.Reducer.stdDev(), sharedInputs=True
+                ),
+                geometry=roi,
+                scale=10,  # Resolución de 10m para Sentinel-2
+                maxPixels=1e9,
+                bestEffort=True
+            )
+            
+            # Obtener información temporal y de metadatos
+            date = ee.Date(img.get('system:time_start'))
+            cloud_cover = img.get('CLOUDY_PIXEL_PERCENTAGE')
+            
+            # Crear feature con manejo seguro de nombres de bandas
+            mean_key = f'{index}_mean'
+            min_key = f'{index}_min'
+            max_key = f'{index}_max'
+            stddev_key = f'{index}_stdDev'
+            
+            return ee.Feature(None, {
+                'date': date.format('YYYY-MM-dd'),
+                'datetime': date.format('YYYY-MM-dd HH:mm:ss'),
+                'timestamp': img.get('system:time_start'),
+                'mean': stats.get(mean_key),
+                'min': stats.get(min_key),
+                'max': stats.get(max_key),
+                'stdDev': stats.get(stddev_key),
+                'cloud_cover': cloud_cover,
+                'satellite': 'Sentinel-2',
+                'product_id': img.get('PRODUCT_ID'),
+                'cloud_threshold_used': threshold
+            })
+        except Exception as e:
+            print(f"Error procesando imagen individual: {str(e)}")
+            # Retornar feature con valores None en caso de error
+            return ee.Feature(None, {
+                'date': None,
+                'datetime': None,
+                'timestamp': None,
+                'mean': None,
+                'min': None,
+                'max': None,
+                'stdDev': None,
+                'cloud_cover': None,
+                'satellite': 'Sentinel-2',
+                'product_id': None,
+                'cloud_threshold_used': threshold,
+                'error': str(e)
+            })
+    
+    # Extraer estadísticas de todas las imágenes
+    try:
+        print("Procesando estadísticas con método optimizado...")
+        
+        # Método optimizado: usar map() en lugar de bucle individual
+        def extract_stats_optimized(img):
+            stats = img.select(index).reduceRegion(
+                reducer=ee.Reducer.mean(),
+                geometry=roi,
+                scale=60,  # Escalas más grandes = más rápido
+                maxPixels=1e5,  # Menos píxeles = más rápido
+                bestEffort=True
+            )
+            
+            return ee.Feature(None, {
+                'date': ee.Date(img.get('system:time_start')).format('YYYY-MM-dd'),
+                'timestamp': img.get('system:time_start'),
+                'mean': stats.get(index),
+                'cloud_cover': img.get('CLOUDY_PIXEL_PERCENTAGE'),
+                'satellite': 'Sentinel-2'
+            })
+        
+        # Limitar a máximo 50 imágenes para velocidad
+        limited_collection = processed_collection.limit(50)
+        image_count = limited_collection.size().getInfo()
+        print(f"Procesando {image_count} imágenes (limitado para velocidad)...")
+        
+        # Usar map() que es mucho más eficiente
+        features = limited_collection.map(extract_stats_optimized)
+        
+        # Obtener todos los datos de una vez
+        time_series_raw = features.aggregate_array('properties').getInfo()
+        print(f"Datos obtenidos: {len(time_series_raw)} elementos")
+        
+        # Filtrar y procesar resultados
+        time_series = []
+        for point in time_series_raw:
+            if point.get('mean') is not None:
+                time_series.append({
+                    'date': point['date'],
+                    'datetime': point['date'] + ' 12:00:00',  # Hora simplificada
+                    'timestamp': point['timestamp'],
+                    'mean': float(point['mean']),
+                    'min': None,  # Omitir para velocidad
+                    'max': None,  # Omitir para velocidad
+                    'stdDev': None,  # Omitir para velocidad
+                    'cloud_cover': float(point['cloud_cover']) if point.get('cloud_cover') is not None else None,
+                    'satellite': 'Sentinel-2',
+                    'product_id': None,  # Omitir para velocidad
+                    'cloud_threshold_used': threshold
+                })
+        
+        # Ordenar por fecha
+        time_series.sort(key=lambda x: x.get('timestamp', 0))
+        
+        print(f"Serie temporal optimizada: {len(time_series)} puntos válidos procesados")
+        return time_series
+        
+    except Exception as e:
+        print(f"Error procesando series temporales: {str(e)}")
+        import traceback
+        print(f"Traceback completo: {traceback.format_exc()}")
+        return []
+
+def compute_sentinel2_index(roi, start, end, index, cloud_pct=30):
+    """
+    Computa índices específicos usando Sentinel-2 para heatmaps
+    """
+    collection = get_sentinel2_collection(roi, start, end, cloud_pct)
+    
+    # Si no hay imágenes, retornar None
+    size = collection.size().getInfo()
+    print(f"Sentinel-2 Heatmap: Encontradas {size} imágenes para composición con cloud_pct < {cloud_pct}%")
+    if size == 0:
+        return None
+    
+    if index.lower() == 'ndvi':
+        # NDVI = (NIR - RED) / (NIR + RED)
+        def addNDVI(img):
+            ndvi = img.normalizedDifference(['B8', 'B4']).rename('ndvi')
+            return img.addBands(ndvi)
+        
+        processed = collection.map(addNDVI)
+        composite = processed.select('ndvi').median().clip(roi)
+        return composite
+        
+    elif index.lower() == 'ndwi':
+        # NDWI = (GREEN - NIR) / (GREEN + NIR)
+        def addNDWI(img):
+            ndwi = img.normalizedDifference(['B3', 'B8']).rename('ndwi')
+            return img.addBands(ndwi)
+            
+        processed = collection.map(addNDWI)
+        composite = processed.select('ndwi').median().clip(roi)
+        return composite
+        
+    elif index.lower() == 'evi':
+        # EVI = 2.5 * (NIR - RED) / (NIR + 6*RED - 7.5*BLUE + 1)
+        def addEVI(img):
+            evi = img.expression(
+                '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))',
+                {
+                    'NIR': img.select('B8'),
+                    'RED': img.select('B4'),
+                    'BLUE': img.select('B2')
+                }
+            ).rename('evi')
+            return img.addBands(evi)
+            
+        processed = collection.map(addEVI)
+        composite = processed.select('evi').median().clip(roi)
+        return composite
+        
+    elif index.lower() == 'savi':
+        # SAVI = ((NIR - RED) / (NIR + RED + 0.5)) * 1.5
+        def addSAVI(img):
+            savi = img.expression(
+                '((NIR - RED) / (NIR + RED + 0.5)) * 1.5',
+                {
+                    'NIR': img.select('B8'),
+                    'RED': img.select('B4')
+                }
+            ).rename('savi')
+            return img.addBands(savi)
+            
+        processed = collection.map(addSAVI)
+        composite = processed.select('savi').median().clip(roi)
+        return composite
+        
+    elif index.lower() == 'gci':
+        # GCI = (NIR / GREEN) - 1
+        def addGCI(img):
+            gci = img.select('B8').divide(img.select('B3')).subtract(1).rename('gci')
+            return img.addBands(gci)
+            
+        processed = collection.map(addGCI)
+        composite = processed.select('gci').median().clip(roi)
+        return composite
+        
+    elif index.lower() == 'vegetation_health':
+        # Combinación de NDVI y EVI
+        def addVegHealth(img):
+            ndvi = img.normalizedDifference(['B8', 'B4'])
+            evi = img.expression(
+                '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))',
+                {
+                    'NIR': img.select('B8'),
+                    'RED': img.select('B4'),
+                    'BLUE': img.select('B2')
+                }
+            )
+            veg_health = ndvi.add(evi).divide(2).rename('vegetation_health')
+            return img.addBands(veg_health)
+            
+        processed = collection.map(addVegHealth)
+        composite = processed.select('vegetation_health').median().clip(roi)
+        return composite
+        
+    elif index.lower() == 'water_detection':
+        # Misma fórmula que NDWI pero enfocada en detección de agua
+        def addWater(img):
+            water = img.normalizedDifference(['B3', 'B8']).rename('water_detection')
+            return img.addBands(water)
+            
+        processed = collection.map(addWater)
+        composite = processed.select('water_detection').median().clip(roi)
+        return composite
+        
+    elif index.lower() == 'urban_index':
+        # NDBI = (SWIR - NIR) / (SWIR + NIR)
+        def addUrban(img):
+            urban = img.normalizedDifference(['B11', 'B8']).rename('urban_index')
+            return img.addBands(urban)
+            
+        processed = collection.map(addUrban)
+        composite = processed.select('urban_index').median().clip(roi)
+        return composite
+        
+    elif index.lower() == 'soil_moisture':
+        # NDMI = (NIR - SWIR) / (NIR + SWIR)
+        def addSoilMoisture(img):
+            soil_moisture = img.normalizedDifference(['B8', 'B11']).rename('soil_moisture')
+            return img.addBands(soil_moisture)
+            
+        processed = collection.map(addSoilMoisture)
+        composite = processed.select('soil_moisture').median().clip(roi)
+        return composite
+        
+    elif index.lower() == 'ndmi':
+        # NDMI = (NIR - SWIR) / (NIR + SWIR)
+        def addNDMI(img):
+            ndmi = img.normalizedDifference(['B8', 'B11']).rename('ndmi')
+            return img.addBands(ndmi)
+            
+        processed = collection.map(addNDMI)
+        composite = processed.select('ndmi').median().clip(roi)
+        return composite
+        
+    elif index.lower() == 'change_detection':
+        # Para detección de cambios, usamos diferencia temporal de NDVI
+        def addChangeDetection(img):
+            ndvi = img.normalizedDifference(['B8', 'B4'])
+            return img.addBands(ndvi.rename('change_detection'))
+            
+        processed = collection.map(addChangeDetection)
+        composite = processed.select('change_detection').median().clip(roi)
+        return composite
+        
+    elif index.lower() == 'rgb':
+        # RGB natural: R=B4, G=B3, B=B2
+        composite = collection.median().select(['B4', 'B3', 'B2']).clip(roi)
+        return composite
+        
+    else:
+        # Por defecto, RGB
+        composite = collection.median().select(['B4', 'B3', 'B2']).clip(roi)
+        return composite

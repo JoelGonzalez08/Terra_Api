@@ -15,92 +15,167 @@ import ee
 from ee_client import init_ee, composite_embedding, BASE_OUTPUT_DIR, parse_kml_to_geojson
 from models import ComputeRequest, ComputeResponse, TimePoint, TimeSeriesRequest, KMLUploadResponse
 
-def index_band_and_vis(index):
+def index_band_and_vis(index, satellite="sentinel2"):
     """
     Devuelve las bandas y parámetros de visualización para cada índice soportado.
+    satellite: "sentinel2" para heatmaps, "alpha_earth" para series y export
     """
     if index == "rgb":
-        # Bandas RGB para Earth Embedding
-        return (["A01", "A16", "A09"], {"min": 0, "max": 1})
+        if satellite == "sentinel2":
+            return (["B4", "B3", "B2"], {"min": 0, "max": 3000})
+        else:
+            # Alpha Earth Embedding
+            return (["A01", "A16", "A09"], {"min": 0, "max": 1})
     elif index == "ndvi":
-        # Paleta NDVI personalizada
+        # Paleta NDVI más pronunciada y contrastada
         return ("ndvi", {
             "min": -1, "max": 1,
             "palette": [
-                '#d73027',  # rojo (valores muy bajos, vegetación nula)
-                '#fdae61',  # naranja
-                '#fee08b',  # amarillo
-                '#d9ef8b',  # verde claro
-                '#1a9850'   # verde intenso (valores altos, vegetación sana)
+                '#8B0000',  # rojo intenso (valores muy bajos, sin vegetación)
+                '#FF4500',  # naranja rojizo
+                '#FFD700',  # amarillo dorado
+                '#ADFF2F',  # verde amarillento
+                '#32CD32',  # verde lima
+                '#228B22',  # verde bosque
+                '#006400'   # verde oscuro intenso (vegetación muy densa)
             ]
         })
     elif index == "ndwi":
-        # Paleta NDWI personalizada
+        # Paleta NDWI más pronunciada (tierra seca a agua)
         return ("ndwi", {
             "min": -1, "max": 1,
             "palette": [
-                "#8B4513",  # -1 a -0.3
-                "#DEB887",  # -0.3 a -0.1
-                "#F0E68C",  # -0.1 a 0.1
-                "#87CEEB",  # 0.1 a 0.3
-                "#4169E1",  # 0.3 a 0.6
-                "#0000FF"   # 0.6 a 1
+                '#8B4513',  # marrón tierra seca
+                '#D2691E',  # chocolate
+                '#F4A460',  # arena
+                '#FFFF99',  # amarillo claro
+                '#87CEEB',  # azul cielo
+                '#4169E1',  # azul real
+                '#0000CD',  # azul medio
+                '#000080'   # azul marino (agua profunda)
             ]
         })
     elif index == "evi":
-        # Paleta EVI personalizada
+        # Paleta EVI más pronunciada
         return ("evi", {
             "min": -1, "max": 1,
             "palette": [
-                "#8B4513",  # -1 a 0
-                "#D2B48C",  # 0 a 0.2
-                "#FFD700",  # 0.2 a 0.4
-                "#9ACD32",  # 0.4 a 0.6
-                "#32CD32",  # 0.6 a 0.8
-                "#006400"   # 0.8 a 1
+                '#8B0000',  # rojo oscuro
+                '#FF0000',  # rojo puro
+                '#FF8C00',  # naranja oscuro
+                '#FFD700',  # oro
+                '#ADFF2F',  # verde amarillo
+                '#32CD32',  # verde lima
+                '#228B22',  # verde bosque
+                '#004225'   # verde muy oscuro
             ]
         })
     elif index == "savi":
-        # Paleta SAVI personalizada
+        # Paleta SAVI más pronunciada
         return ("savi", {
             "min": -1, "max": 1,
             "palette": [
-                "#8B4513",  # -1 a 0
-                "#D2B48C",  # 0 a 0.15
-                "#FFD700",  # 0.15 a 0.3
-                "#9ACD32",  # 0.3 a 0.45
-                "#32CD32",  # 0.45 a 0.6
-                "#006400"   # 0.6 a 1
+                '#800000',  # granate
+                '#DC143C',  # carmesí
+                '#FF6347',  # tomate
+                '#FFA500',  # naranja
+                '#FFD700',  # dorado
+                '#9ACD32',  # verde amarillo
+                '#32CD32',  # verde lima
+                '#228B22'   # verde bosque
             ]
         })
     elif index == "ndmi":
-        # Paleta NDMI sugerida (puedes ajustar los colores si lo deseas)
+        # Paleta NDMI más pronunciada (seco a húmedo)
         return ("ndmi", {
             "min": -1, "max": 1,
             "palette": [
-                "#8B4513",  # -1 a -0.3 (muy seco)
-                "#DEB887",  # -0.3 a -0.1 (seco)
-                "#F0E68C",  # -0.1 a 0.1 (moderado)
-                "#87CEEB",  # 0.1 a 0.3 (húmedo)
-                "#4169E1",  # 0.3 a 0.6 (muy húmedo)
-                "#0000FF"   # 0.6 a 1 (agua/saturado)
+                '#8B0000',  # rojo oscuro (muy seco)
+                '#CD853F',  # marrón claro
+                '#F0E68C',  # caqui
+                '#FFFF00',  # amarillo puro
+                '#ADFF2F',  # verde amarillo
+                '#00CED1',  # turquesa
+                '#1E90FF',  # azul dodger
+                '#0000FF'   # azul puro (muy húmedo/agua)
             ]
         })
     elif index == "gci":
-        return ("gci", {"min": -1, "max": 1, "palette": ["red", "white", "green"]})
+        # Paleta GCI más pronunciada (clorofila)
+        return ("gci", {
+            "min": -1, "max": 1,
+            "palette": [
+                '#8B0000',  # rojo oscuro (sin clorofila)
+                '#FF6347',  # tomate
+                '#FFA500',  # naranja
+                '#FFD700',  # dorado
+                '#ADFF2F',  # verde amarillo
+                '#32CD32',  # verde lima
+                '#228B22',  # verde bosque
+                '#006400'   # verde oscuro (alta clorofila)
+            ]
+        })
     elif index == "vegetation_health":
-        return ("vegetation_health", {"min": 0, "max": 1, "palette": ["red", "yellow", "green"]})
+        # Paleta de salud de vegetación más pronunciada
+        return ("vegetation_health", {
+            "min": 0, "max": 1,
+            "palette": [
+                '#8B0000',  # rojo intenso (vegetación enferma)
+                '#FF4500',  # naranja rojizo
+                '#FFD700',  # dorado (salud moderada)
+                '#ADFF2F',  # verde amarillo
+                '#00FF00'   # verde brillante (vegetación sana)
+            ]
+        })
     elif index == "water_detection":
-        return ("water_detection", {"min": 0, "max": 1, "palette": ["white", "blue"]})
+        # Paleta de detección de agua más pronunciada
+        return ("water_detection", {
+            "min": 0, "max": 1,
+            "palette": [
+                '#FFFFFF',  # blanco puro (sin agua)
+                '#87CEEB',  # azul cielo claro
+                '#4169E1',  # azul real
+                '#0000FF'   # azul puro (agua)
+            ]
+        })
     elif index == "urban_index":
-        return ("urban_index", {"min": 0, "max": 1, "palette": ["white", "gray", "black"]})
+        # Paleta urbana más pronunciada
+        return ("urban_index", {
+            "min": 0, "max": 1,
+            "palette": [
+                '#FFFFFF',  # blanco (natural)
+                '#C0C0C0',  # plata
+                '#808080',  # gris
+                '#000000'   # negro (urbano intenso)
+            ]
+        })
     elif index == "soil_moisture":
-        return ("soil_moisture", {"min": 0, "max": 1, "palette": ["yellow", "brown", "blue"]})
+        # Paleta de humedad del suelo más pronunciada
+        return ("soil_moisture", {
+            "min": 0, "max": 1,
+            "palette": [
+                '#FFFF00',  # amarillo brillante (seco)
+                '#FFA500',  # naranja
+                '#8B4513',  # marrón (húmedo)
+                '#0000FF'   # azul intenso (saturado)
+            ]
+        })
     elif index == "change_detection":
-        return ("change_detection", {"min": -1, "max": 1, "palette": ["red", "white", "green"]})
+        # Paleta de detección de cambios más pronunciada
+        return ("change_detection", {
+            "min": -1, "max": 1,
+            "palette": [
+                '#FF0000',  # rojo puro (pérdida)
+                '#FFFFFF',  # blanco (sin cambio)
+                '#00FF00'   # verde puro (ganancia)
+            ]
+        })
     else:
         # Fallback a RGB
-        return (["A01", "A16", "A09"], {"min": 0, "max": 1})
+        if satellite == "sentinel2":
+            return (["B4", "B3", "B2"], {"min": 0, "max": 3000})
+        else:
+            return (["A01", "A16", "A09"], {"min": 0, "max": 1})
 
 load_dotenv()
 
@@ -176,8 +251,13 @@ def get_user_info(current_user: dict = Depends(get_current_user)):
 @app.get("/")
 def root():
     return {
-        "message": "Terra API - Google Earth Engine Alpha Embedding",
+        "message": "Terra API - Google Earth Engine con Sentinel-2 (Heatmaps) y Alpha Earth (Series/Export)",
         "status": "active",
+        "data_sources": {
+            "heatmaps": "Sentinel-2 SR Harmonized - Procesamiento en tiempo real con máscara de nubes SCL",
+            "time_series": "Sentinel-2 SR Harmonized - Composiciones mensuales", 
+            "export": "Alpha Earth Embedding - Datos pre-procesados"
+        },
         "available_analyses": [
             "rgb", "ndvi", "ndwi", "evi", "savi", "gci", "vegetation_health",
             "water_detection", "urban_index", "soil_moisture", "change_detection", "ndmi"
@@ -188,8 +268,8 @@ def root():
             "/user": "Información del usuario (GET - requiere token)",
             "/health": "Estado de la conexión con Earth Engine",
             "/upload-kml": "Subir archivo KML de parcelas (POST)",
-            "/time-series": "Análisis de series temporales (POST)",
-            "/compute": "Análisis de heatmaps y exports (POST)"
+            "/time-series": "Análisis de series temporales con Sentinel-2 (POST)",
+            "/compute": "Análisis de heatmaps con Sentinel-2 y exports con Alpha Earth (POST)"
         },
         "docs": "/docs",
         "authentication": {
@@ -265,151 +345,105 @@ async def upload_kml(file: UploadFile = File(...)):
 @app.post("/time-series")
 def get_time_series(req: TimeSeriesRequest):
     """
-    Endpoint principal para series temporales mensuales usando Sentinel-2
-    Basado en el enfoque mensual de Google Earth Engine que funciona correctamente
+    Endpoint para series temporales con datos de cada pasada individual de Sentinel-2
+    Retorna datos de cada imagen por separado (no composiciones mensuales)
     """
+    import logging
+    import traceback
+    
+    # Configurar logging
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    
     try:
+        logger.info(f"Iniciando serie temporal para índice: {req.index}")
+        logger.info(f"Rango de fechas: {req.start} - {req.end}")
+        
         init_ee()
+        logger.info("Earth Engine inicializado correctamente")
         
         # Crear ROI
         if req.geometry:
             roi = make_roi_from_geojson(req.geometry)
+            logger.info("ROI creado desde geometría GeoJSON")
         else:
             roi = make_roi(req.lon, req.lat, req.width_m, req.height_m)
+            logger.info(f"ROI creado desde coordenadas: {req.lon}, {req.lat}")
         
-        # Colección base Sentinel-2
-        s2 = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-              .filterBounds(roi)
-              .filterDate(req.start, req.end))
+        # Obtener parámetro de nubosidad desde el request o usar default
+        cloud_pct = getattr(req, 'cloud_pct', 70)  # Más permisivo para series temporales
+        logger.info(f"Usando threshold de nubes: {cloud_pct}%")
         
-        # Máscara de nubes SCL (Scene Classification Layer)
-        def maskS2SCL(img):
-            scl = img.select('SCL')
-            good = (scl.neq(3)    # shadow
-                   .And(scl.neq(8))   # cloud medium probability  
-                   .And(scl.neq(9))   # cloud high probability
-                   .And(scl.neq(10))  # cirrus
-                   .And(scl.neq(11))) # snow/ice
-            return img.updateMask(good)
+        # Usar la nueva función de series temporales individuales
+        from ee_client import get_sentinel2_time_series
+        logger.info("Función get_sentinel2_time_series importada")
         
-        # Seleccionar función de índice según el parámetro
-        if req.index == "ndvi":
-            def addIndex(img):
-                return img.addBands(img.normalizedDifference(['B8','B4']).rename('INDEX'))
-        elif req.index == "gci":
-            def addIndex(img):
-                nir = img.select('B8')
-                green = img.select('B3')
-                return img.addBands(nir.divide(green).subtract(1).rename('INDEX'))
-        elif req.index == "ndwi":
-            def addIndex(img):
-                return img.addBands(img.normalizedDifference(['B3','B8']).rename('INDEX'))
-        elif req.index == "evi":
-            def addIndex(img):
-                nir = img.select('B8')
-                red = img.select('B4')
-                blue = img.select('B2')
-                evi = nir.subtract(red).multiply(2.5).divide(
-                    nir.add(red.multiply(6)).subtract(blue.multiply(7.5)).add(1)
-                ).rename('INDEX')
-                return img.addBands(evi)
-        elif req.index == "savi":
-            def addIndex(img):
-                nir = img.select('B8')
-                red = img.select('B4')
-                savi = nir.subtract(red).multiply(1.5).divide(
-                    nir.add(red).add(0.5)
-                ).rename('INDEX')
-                return img.addBands(savi)
-        elif req.index == "rgb":
-            def addIndex(img):
-                # Para RGB usamos banda roja como proxy
-                return img.addBands(img.select('B4').rename('INDEX'))
+        logger.info("Iniciando procesamiento de series temporales...")
+        series_data = get_sentinel2_time_series(roi, req.start, req.end, req.index, cloud_pct)
+        logger.info(f"Series temporales procesadas: {len(series_data) if series_data else 0} puntos")
+        
+        if not series_data:
+            logger.warning("No se encontraron datos de series temporales")
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No se encontraron imágenes de Sentinel-2 para el índice {req.index} en el rango {req.start} - {req.end}"
+            )
+        
+        # Calcular estadísticas de resumen
+        logger.info("Calculando estadísticas de resumen...")
+        values = [point['mean'] for point in series_data if point.get('mean') is not None]
+        total_images = len(series_data)
+        logger.info(f"Valores válidos encontrados: {len(values)} de {total_images}")
+        
+        if values:
+            summary_stats = {
+                "total_points": total_images,
+                "valid_points": len(values),
+                "period_mean": sum(values) / len(values),
+                "period_min": min(values),
+                "period_max": max(values),
+                "total_images_used": total_images,
+                "data_source": "Sentinel-2 SR Harmonized (Individual Passes)",
+                "temporal_resolution": "5-day average revisit",
+                "cloud_mask": "SCL (Scene Classification Layer)",
+                "cloud_threshold": f"< {cloud_pct}%",
+                "trend": "increasing" if len(values) > 1 and values[-1] > values[0] else "decreasing" if len(values) > 1 else "stable",
+                "date_range_coverage": {
+                    "first_image": series_data[0]['date'] if series_data else None,
+                    "last_image": series_data[-1]['date'] if series_data else None
+                }
+            }
         else:
-            # Fallback a NDVI
-            def addIndex(img):
-                return img.addBands(img.normalizedDifference(['B8','B4']).rename('INDEX'))
+            summary_stats = {
+                "total_points": 0,
+                "valid_points": 0,
+                "period_mean": None,
+                "period_min": None,
+                "period_max": None,
+                "total_images_used": 0,
+                "data_source": "Sentinel-2 SR Harmonized (Individual Passes)",
+                "cloud_threshold": f"< {cloud_pct}%",
+                "trend": "no_data"
+            }
         
-        # Aplicar máscara e índice
-        s2prep = s2.map(maskS2SCL).map(addIndex)
-        
-        # Procesar cada mes manualmente (método que funciona)
-        start_date = ee.Date(req.start)
-        end_date = ee.Date(req.end)
-        
-        time_series = []
-        
-        # Iterar por cada mes
-        current_date = start_date
-        while current_date.difference(end_date, 'month').getInfo() < 0:
-            month_end = current_date.advance(1, 'month')
-            
-            # Filtrar imágenes del mes
-            monthly_imgs = s2prep.filterDate(current_date, month_end)
-            img_count = monthly_imgs.size().getInfo()
-            
-            if img_count > 0:
-                # Crear composición mensual (promedio)
-                composite = monthly_imgs.select('INDEX').mean()
-                
-                # Extraer estadísticas de la región
-                stats = composite.reduceRegion(
-                    reducer=ee.Reducer.mean(),
-                    geometry=roi,
-                    scale=10,
-                    bestEffort=True,
-                    maxPixels=1e6
-                )
-                
-                index_value = stats.get('INDEX').getInfo()
-                
-                if index_value is not None:
-                    time_series.append({
-                        'date': current_date.format('YYYY-MM').getInfo(),
-                        'year': int(current_date.get('year').getInfo()),
-                        'month': int(current_date.get('month').getInfo()),
-                        'mean': float(index_value),
-                        'image_count': img_count,
-                        'min': None,  # Se puede implementar con otros reductores
-                        'max': None,
-                        'std': None,
-                        'pixels': None
-                    })
-            
-            # Avanzar al siguiente mes
-            current_date = month_end
-        
-        if not time_series:
-            raise HTTPException(status_code=404, detail="No se encontraron datos válidos para el análisis especificado")
-        
-        # Calcular estadísticas resumen del período
-        values = [point['mean'] for point in time_series]
-        total_images = sum([point['image_count'] for point in time_series])
-        
-        summary_stats = {
-            "total_points": len(time_series),
-            "valid_points": len(values),
-            "period_mean": sum(values) / len(values),
-            "period_min": min(values),
-            "period_max": max(values),
-            "total_images_used": total_images,
-            "data_source": "Sentinel-2 SR Harmonized (Monthly Composites)",
-            "composite_method": "mean",
-            "cloud_mask": "SCL (Scene Classification Layer)",
-            "trend": "increasing" if len(values) > 1 and values[-1] > values[0] else "decreasing" if len(values) > 1 else "stable"
-        }
-        
-        return {
+        logger.info("Preparando respuesta final...")
+        response = {
             "analysis_type": req.index,
             "roi": roi.getInfo(),
             "date_range": {"start": req.start, "end": req.end},
-            "time_series": time_series,
+            "time_series": series_data,
             "summary": summary_stats
         }
         
-    except ee.EEException as eex:
-        raise HTTPException(status_code=500, detail=f"Earth Engine error: {str(eex)}")
+        logger.info("Serie temporal completada exitosamente")
+        return response
+        
+    except HTTPException as he:
+        logger.error(f"HTTPException: {he.detail}")
+        raise he
     except Exception as ex:
+        logger.error(f"Error inesperado en series temporales: {str(ex)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error generando serie temporal: {str(ex)}")
 
 # ---------- core endpoint ----------
@@ -439,18 +473,35 @@ def compute(req: ComputeRequest):
             raise HTTPException(status_code=500, detail="No se pudo construir la geometría del área de interés (ROI)")
 
         # Determinar el tipo de análisis a realizar
-        band, vis = index_band_and_vis(req.index)
+        band, vis = index_band_and_vis(req.index, satellite="sentinel2")
         
-        # Para análisis que requieren cálculos especiales
-        if req.index in ["ndvi", "ndwi", "evi", "savi", "gci", "vegetation_health", 
+        # Para heatmaps, usar Sentinel-2
+        if req.mode == "heatmap":
+            from ee_client import compute_sentinel2_index
+            # Obtener parámetro de nubosidad, default 30% para heatmaps
+            cloud_pct = getattr(req, 'cloud_pct', 30)
+            img = compute_sentinel2_index(roi, req.start, req.end, req.index, cloud_pct)
+            if img is None:
+                raise HTTPException(status_code=404, detail=f"No se encontraron imágenes de Sentinel-2 para el rango de fechas especificado con nubosidad < {cloud_pct}%")
+            
+            if req.index == "rgb":
+                layer = img.select(band)  # band será ["B4", "B3", "B2"]
+            else:
+                layer = img.select(band)  # band será el nombre del índice
+                
+        # Para series y export, mantener Alpha Earth como antes
+        elif req.index in ["ndvi", "ndwi", "evi", "savi", "gci", "vegetation_health", 
                         "water_detection", "urban_index", "soil_moisture", "change_detection", "ndmi"]:
+            # Usar Alpha Earth para series y export (mantener compatibilidad)
+            band_alpha, vis_alpha = index_band_and_vis(req.index, satellite="alpha_earth")
             from ee_client import composite_embedding_with_analysis
             img = composite_embedding_with_analysis(roi, req.start, req.end, req.index)
             if img is None:
                 raise HTTPException(status_code=404, detail="No se encontraron imágenes de embedding para el rango de fechas especificado")
-            layer = img.select(band)
+            layer = img.select(band_alpha)
+            band, vis = band_alpha, vis_alpha
         else:
-            # Para RGB o análisis simples
+            # Para RGB o análisis simples con Alpha Earth
             dataset = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
             img = dataset.filterDate(req.start, req.end).filterBounds(roi).first()
             
@@ -460,11 +511,13 @@ def compute(req: ComputeRequest):
             img = img.clip(roi)
             
             if req.index == "rgb":
-                # Para RGB, seleccionar las 3 bandas y verificar que existan
+                # Para RGB, seleccionar las 3 bandas de Alpha Earth
+                band_alpha, vis_alpha = index_band_and_vis(req.index, satellite="alpha_earth")
                 try:
-                    layer = img.select(band)  # band será ["A01", "A16", "A09"]
+                    layer = img.select(band_alpha)  # band será ["A01", "A16", "A09"]
+                    band, vis = band_alpha, vis_alpha
                 except Exception as e:
-                    raise HTTPException(status_code=500, detail=f"Error seleccionando bandas RGB {band}: {str(e)}")
+                    raise HTTPException(status_code=500, detail=f"Error seleccionando bandas RGB {band_alpha}: {str(e)}")
             else:
                 # Para otros casos
                 layer = img.select(band)
@@ -484,76 +537,37 @@ def compute(req: ComputeRequest):
                 logging.error(f"Error generando mapa: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Error generando heatmap: {str(e)}")
 
-        # MODO SERIES: promedio por fecha dentro del ROI (serie temporal)
+        # MODO SERIES: datos de cada pasada individual de Sentinel-2
         if req.mode == "series":
             import logging
             
-            # Para análisis que requieren cálculos especiales
-            if req.index in ["ndvi", "ndwi", "evi", "savi", "gci", "vegetation_health",
-                            "water_detection", "urban_index", "soil_moisture", "change_detection", "ndmi"]:
-                from ee_client import get_embedding_collection
-                from ee_client import (compute_ndvi_proxy, compute_ndwi_proxy, compute_evi_proxy, 
-                                     compute_savi_proxy, compute_gci_proxy, compute_vegetation_health, compute_water_detection,
-                                     compute_urban_index, compute_soil_moisture, compute_change_detection, compute_ndmi_proxy)
-                
-                col = get_embedding_collection(roi, req.start, req.end)
-                count_imgs = col.size().getInfo()
-                logging.warning(f"[GEE] Imágenes de embedding en la colección: {count_imgs}")
-                
-                # Aplicar el análisis específico a cada imagen
-                analysis_functions = {
-                    "ndvi": compute_ndvi_proxy,
-                    "ndwi": compute_ndwi_proxy,
-                    "evi": compute_evi_proxy,
-                    "savi": compute_savi_proxy,
-                    "gci": compute_gci_proxy,
-                    "vegetation_health": compute_vegetation_health,
-                    "water_detection": compute_water_detection,
-                    "urban_index": compute_urban_index,
-                    "soil_moisture": compute_soil_moisture,
-                    "change_detection": compute_change_detection,
-                    "ndmi": compute_ndmi_proxy
-                }
-                
-                processed_col = col.map(analysis_functions[req.index])
-                band, vis = index_band_and_vis(req.index)
-                sel = processed_col.select(band)
-            else:
-                # Para RGB o análisis simples
-                dataset = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
-                col = dataset.filterDate(req.start, req.end).filterBounds(roi)
-                count_imgs = col.size().getInfo()
-                logging.warning(f"[GEE] Imágenes de embedding en la colección: {count_imgs}")
-                
-                band, vis = index_band_and_vis(req.index)
-                if req.index == "rgb":
-                    # Para RGB, usar la primera banda como referencia
-                    band = band[0]  # A01
-                
-                sel = col.select(band)
+            # Usar Sentinel-2 para series temporales con datos de cada pasada
+            from ee_client import get_sentinel2_time_series
             
-            def per_img(i):
-                stat = i.select(band).reduceRegion(
-                    ee.Reducer.mean()
-                    .combine(reducer2=ee.Reducer.min(), sharedInputs=True)
-                    .combine(reducer2=ee.Reducer.max(), sharedInputs=True),
-                    roi, 60)
-                return ee.Feature(None, {
-                    'date': ee.Date(i.get('system:time_start')).format('YYYY-MM-dd'),
-                    'mean': stat.get(f'{band}_mean'),
-                    'min': stat.get(f'{band}_min'),
-                    'max': stat.get(f'{band}_max')
-                })
-            fc = ee.FeatureCollection(sel.map(per_img))
-            arr = fc.aggregate_array('properties').getInfo()
-            logging.warning(f"[GEE] Resultados de la serie (incluyendo None): {arr}")
-            # Mostrar todos los valores, incluso None, en la respuesta
-            series = arr  # [{date, mean, min, max}, ...]
-            return ComputeResponse(
-                mode=req.mode, index=req.index,
-                roi=roi.getInfo(),
-                series=series
-            )
+            # Obtener parámetro de nubosidad, default 50% para series (más permisivo)
+            cloud_pct = getattr(req, 'cloud_pct', 50)
+            
+            try:
+                series_data = get_sentinel2_time_series(roi, req.start, req.end, req.index, cloud_pct)
+                
+                if not series_data:
+                    raise HTTPException(
+                        status_code=404, 
+                        detail=f"No se encontraron imágenes de Sentinel-2 para el índice {req.index} en el rango de fechas {req.start} - {req.end} con nubosidad < {cloud_pct}%"
+                    )
+                
+                logging.info(f"Series temporal: {len(series_data)} imágenes individuales de Sentinel-2")
+                
+                return ComputeResponse(
+                    mode=req.mode, 
+                    index=req.index,
+                    roi=roi.getInfo(),
+                    series=series_data
+                )
+                
+            except Exception as e:
+                logging.error(f"Error en series temporales de Sentinel-2: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Error generando serie temporal: {str(e)}")
 
         # MODO EXPORT: guardar GeoTIFF + CSV en ./outputs
         if req.mode == "export":
@@ -607,13 +621,13 @@ def compute(req: ComputeRequest):
                 }
                 
                 processed_col = col.map(analysis_functions[req.index])
-                band, vis = index_band_and_vis(req.index)
+                band, vis = index_band_and_vis(req.index, satellite="alpha_earth")
                 sel = processed_col.select(band)
             else:
                 # Para RGB o análisis simples
                 dataset = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
                 col = dataset.filterDate(req.start, req.end).filterBounds(roi)
-                band, vis = index_band_and_vis(req.index)
+                band, vis = index_band_and_vis(req.index, satellite="alpha_earth")
                 if req.index == "rgb":
                     band = band[0]  # Usar primera banda como referencia
                 sel = col.select(band)
