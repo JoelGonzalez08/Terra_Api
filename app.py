@@ -27,12 +27,11 @@ def index_band_and_vis(index):
         return ("ndvi", {
             "min": -1, "max": 1,
             "palette": [
-                "#8B4513",  # -1 a -0.1
-                "#D2B48C",  # -0.1 a 0.1
-                "#FFD700",  # 0.1 a 0.3
-                "#9ACD32",  # 0.3 a 0.5
-                "#32CD32",  # 0.5 a 0.7
-                "#006400"   # 0.7 a 1
+                '#d73027',  # rojo (valores muy bajos, vegetación nula)
+                '#fdae61',  # naranja
+                '#fee08b',  # amarillo
+                '#d9ef8b',  # verde claro
+                '#1a9850'   # verde intenso (valores altos, vegetación sana)
             ]
         })
     elif index == "ndwi":
