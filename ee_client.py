@@ -107,7 +107,16 @@ def parse_kml_to_geojson(kml_content: str):
             "area_hectares": 0,
             "bounds": None
         }
-    main_geometry = features[0]["geometry"]
+    # Si hay múltiples polígonos, construir MultiPolygon como geometría principal
+    if len(features) > 1:
+        try:
+            from shapely.geometry import MultiPolygon
+            multip = MultiPolygon([Polygon(f['geometry']['coordinates'][0]) if f['geometry']['type']=='Polygon' else Polygon(f['geometry']['coordinates'][0][0]) for f in features])
+            main_geometry = mapping(multip)
+        except Exception:
+            main_geometry = features[0]["geometry"]
+    else:
+        main_geometry = features[0]["geometry"]
     return {
         "success": True,
         "message": f"KML procesado correctamente. {len(features)} polígono(s) encontrado(s).",

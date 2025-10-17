@@ -13,6 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any
 import ee
 from ee_client import init_ee, composite_embedding, BASE_OUTPUT_DIR, parse_kml_to_geojson
+import uuid
+import pathlib
 from models import ComputeRequest, ComputeResponse, TimePoint, TimeSeriesRequest, KMLUploadResponse
 
 def index_band_and_vis(index, satellite="sentinel2"):
@@ -321,14 +323,26 @@ async def upload_kml(file: UploadFile = File(...)):
                 detail=result["message"]
             )
         
-        # Retornar directamente el diccionario para evitar problemas con Pydantic
+        # Guardar geometría en disco para referencia posterior (/compute)
+        kml_dir = pathlib.Path(BASE_OUTPUT_DIR) / 'kml_uploads'
+        kml_dir.mkdir(parents=True, exist_ok=True)
+        kml_id = str(uuid.uuid4())
+        geojson_path = kml_dir / f"{kml_id}.geojson"
+        with open(geojson_path, 'w', encoding='utf-8') as fh:
+            json.dump({
+                'type': 'FeatureCollection',
+                'features': result.get('features', [])
+            }, fh, ensure_ascii=False)
+
+        # Retornar info incluyendo kml_id que el cliente puede pasar a /compute
         return {
             "success": result["success"],
             "message": result["message"],
             "geometry": result["geometry"],
             "features_count": result["features_count"],
             "area_hectares": result["area_hectares"],
-            "bounds": result["bounds"]
+            "bounds": result["bounds"],
+            "kml_id": kml_id
         }
         
     except UnicodeDecodeError:
@@ -457,10 +471,29 @@ def compute(req: ComputeRequest):
     que utiliza Sentinel-2 y permite fechas personalizadas.
     """
     try:
-        # Permitir ROI por GeoJSON o por lon/lat/width/height
+        # Permitir ROI por kml_id (guardado), GeoJSON o por lon/lat/width/height
         roi_bounds = None  # Para almacenar coordenadas exactas del rectángulo
-        
-        if req.geometry:
+
+        # 1) si se proporcionó kml_id, cargar la geojson guardada
+        if getattr(req, 'kml_id', None):
+            try:
+                kml_dir = Path(BASE_OUTPUT_DIR) / 'kml_uploads'
+                geojson_path = kml_dir / f"{req.kml_id}.geojson"
+                if not geojson_path.exists():
+                    raise HTTPException(status_code=404, detail='kml_id no encontrado')
+                with open(geojson_path, 'r', encoding='utf-8') as fh:
+                    fc = json.load(fh)
+                if not fc.get('features'):
+                    raise HTTPException(status_code=400, detail='GeoJSON guardado inválido')
+                geom = fc['features'][0]['geometry']
+                roi = make_roi_from_geojson(geom)
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f'Error cargando kml guardado: {str(e)}')
+
+        # 2) fallback a geometry en la request
+        elif req.geometry:
             roi = make_roi_from_geojson(req.geometry)
         else:
             # Validar que todos los campos estén presentes y sean válidos
@@ -470,7 +503,7 @@ def compute(req: ComputeRequest):
                     missing.append(field)
             if missing:
                 raise HTTPException(status_code=400, detail=f"Faltan los campos requeridos: {', '.join(missing)}")
-            
+
             # Obtener ROI y coordenadas exactas
             roi_bounds = meters_to_degrees(req.lon, req.lat, req.width_m, req.height_m)
             roi = ee.Geometry.Rectangle(roi_bounds)
@@ -531,19 +564,77 @@ def compute(req: ComputeRequest):
 
         # MODO HEATMAP: devolver plantilla de tiles XYZ (para React/Leaflet/Native)
         if req.mode == "heatmap":
-            try:
-                m = layer.getMapId(vis)
-                return ComputeResponse(
-                    mode=req.mode, index=req.index,
-                    roi=roi.getInfo(),
-                    roi_bounds=roi_bounds,
-                    tileUrlTemplate=m['tile_fetcher'].url_format,
-                    vis=vis
-                )
-            except Exception as e:
-                import logging
-                logging.error(f"Error generando mapa: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Error generando heatmap: {str(e)}")
+                # Si se solicita exportación a archivo
+                if getattr(req, 'export_format', None) in ('png', 'geotiff'):
+                    ensure_outputs_dir()
+                    ts = int(time.time())
+                    base = f"{req.index}_{req.start}_{req.end}_{ts}"
+                    saved = {}
+                    if req.export_format == 'geotiff':
+                        geotiff_path = Path(BASE_OUTPUT_DIR) / f"{base}.tif"
+                        url = layer.getDownloadURL({
+                            'scale': 10,
+                            'region': roi,
+                            'format': 'GEO_TIFF',
+                            'crs': 'EPSG:4326'
+                        })
+                        # Descargar
+                        import requests as _requests
+                        r = _requests.get(url, stream=True)
+                        r.raise_for_status()
+                        with open(geotiff_path, 'wb') as fh:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                if chunk:
+                                    fh.write(chunk)
+                        saved['geotiff'] = str(geotiff_path)
+                    elif req.export_format == 'png':
+                        png_path = Path(BASE_OUTPUT_DIR) / f"{base}.png"
+                        try:
+                            thumb_params = dict(vis)
+                        except Exception:
+                            thumb_params = vis if vis else {}
+                        thumb_params.update({
+                            'region': roi,
+                            'dimensions': 1024
+                        })
+                        try:
+                            url = layer.getThumbURL(thumb_params)
+                        except Exception:
+                            url = layer.getDownloadURL({
+                                'scale': 10,
+                                'region': roi,
+                                'format': 'PNG'
+                            })
+                        import requests as _requests
+                        r = _requests.get(url, stream=True)
+                        r.raise_for_status()
+                        with open(png_path, 'wb') as fh:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                if chunk:
+                                    fh.write(chunk)
+                        saved['png'] = str(png_path)
+
+                    return ComputeResponse(
+                        mode=req.mode, index=req.index,
+                        roi=roi.getInfo(),
+                        roi_bounds=roi_bounds,
+                        saved_files=saved
+                    )
+
+                # Por defecto, devolver tiles para uso en cliente
+                try:
+                    m = layer.getMapId(vis)
+                    return ComputeResponse(
+                        mode=req.mode, index=req.index,
+                        roi=roi.getInfo(),
+                        roi_bounds=roi_bounds,
+                        tileUrlTemplate=m['tile_fetcher'].url_format,
+                        vis=vis
+                    )
+                except Exception as e:
+                    import logging
+                    logging.error(f"Error generando mapa: {str(e)}")
+                    raise HTTPException(status_code=500, detail=f"Error generando heatmap: {str(e)}")
 
         # MODO SERIES: datos de cada pasada individual de Sentinel-2
         if req.mode == "series":
