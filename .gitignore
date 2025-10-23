@@ -1,5 +1,4 @@
 .venv
 .env
-/__pycache__
-index.html
+__pycache__*
 outputs/
