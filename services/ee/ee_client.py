@@ -246,4 +246,74 @@ def get_sentinel2_time_series(roi, start, end, index, cloud_pct=70):
     except Exception:
         return []
 
+
+def get_sentinel2_dates(roi, start, end, cloud_pct=100):
+    """
+    Obtiene todas las fechas disponibles de imágenes Sentinel-2 para una geometría.
+    
+    Args:
+        roi: ee.Geometry - región de interés
+        start: str - fecha inicio (YYYY-MM-DD)
+        end: str - fecha fin (YYYY-MM-DD)
+        cloud_pct: int - filtro max de cobertura de nubes (0-100), default 100 (todas)
+    
+    Returns:
+        List[dict] - lista de diccionarios con metadata de cada imagen:
+            - date: str (YYYY-MM-DD)
+            - system_time_start: int (milliseconds)
+            - cloud_cover: float (0-100)
+            - tile_id: str (MGRS tile)
+    """
+    try:
+        # Obtener colección sin máscara (queremos todas las fechas disponibles)
+        collection = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                     .filterBounds(roi)
+                     .filterDate(start, end)
+                     .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', cloud_pct))
+                     .sort('system:time_start'))
+        
+        # Obtener el tamaño de la colección
+        size = collection.size().getInfo()
+        
+        if size == 0:
+            return []
+        
+        # Convertir a lista y extraer metadata
+        image_list = collection.toList(size)
+        dates = []
+        
+        for i in range(size):
+            try:
+                img = ee.Image(image_list.get(i))
+                props = img.getInfo()['properties']
+                
+                date_ms = props.get('system:time_start')
+                if not date_ms:
+                    continue
+                
+                # Convertir timestamp a fecha ISO
+                import datetime
+                date_obj = datetime.datetime.utcfromtimestamp(date_ms / 1000)
+                date_str = date_obj.strftime('%Y-%m-%d')
+                
+                # Extraer metadata adicional
+                cloud_cover = props.get('CLOUDY_PIXEL_PERCENTAGE')
+                tile_id = props.get('MGRS_TILE', props.get('system:index'))
+                
+                dates.append({
+                    'date': date_str,
+                    'system_time_start': date_ms,
+                    'cloud_cover': float(cloud_cover) if cloud_cover is not None else None,
+                    'tile_id': str(tile_id) if tile_id else None
+                })
+            except Exception:
+                # Skip imágenes con errores de metadata
+                continue
+        
+        return dates
+    
+    except Exception as e:
+        raise RuntimeError(f"Error obteniendo fechas de Sentinel-2: {str(e)}")
+
+
 # rest of file omitted for brevity; original content preserved

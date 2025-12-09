@@ -18,7 +18,7 @@ def get_assets(tenant_id: str = None, plot_id: str = None, limit: int = 100, cur
 
 
 @router.get('/assets/{asset_id}')
-def get_asset_meta(asset_id: str, current_user: dict = Depends(get_current_user)):
+def get_asset_meta(asset_id: str):
     try:
         a = get_asset(asset_id)
         if not a:

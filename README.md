@@ -46,6 +46,22 @@ Rutas principales (endpoints)
 - `POST /time-series`
 	- Devuelve solo la serie temporal (parecido a mode=series) útil para consultas rápidas.
 
+- `POST /dates` **[NUEVO]**
+	- Descripción: Obtiene todas las fechas disponibles de imágenes Sentinel-2 para una geometría.
+	- Payload (ejemplo):
+		```json
+		{
+			"geometry": { ... },  // GeoJSON o lon/lat + width_m/height_m
+			"start": "2024-01-01",
+			"end": "2024-12-31",
+			"cloud_pct": 50  // Filtro máximo de nubes (0-100), default 100
+		}
+		```
+	- Retorna: lista de fechas con metadata (date, cloud_cover, tile_id, system_time_start).
+	- Almacena las fechas en la base de datos (tabla `sentinel2_dates`).
+	- Útil para: ver disponibilidad temporal antes de procesar, seleccionar fechas óptimas (menor nubosidad).
+	- Ver documentación completa en `docs/dates_endpoint.md`.
+
 - `POST /kml` (o ruta similar en `routes/kml`)
 	- Sube/parsea un archivo KML, devuelve GeoJSON y métricas (área, bounds, features).
 

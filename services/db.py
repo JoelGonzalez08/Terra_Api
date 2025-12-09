@@ -48,6 +48,21 @@ def init_db():
             quality TEXT
         )''')
 
+        # Create sentinel2_dates table
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS sentinel2_dates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            geometry_id TEXT NOT NULL,
+            user_id TEXT,
+            date TEXT NOT NULL,
+            system_time_start INTEGER,
+            cloud_cover REAL,
+            tile_id TEXT,
+            roi_geojson TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(geometry_id, date, system_time_start)
+        )''')
+
         conn.commit()
     finally:
         conn.close()
@@ -216,5 +231,96 @@ def list_measurements(plot_id: str = None, metric_type: str = None, limit: int =
         return results
     finally:
         conn.close()
+
+
+def insert_sentinel2_date(geometry_id: str, user_id: str = None, date: str = None,
+                          system_time_start: int = None, cloud_cover: float = None,
+                          tile_id: str = None, roi_geojson: dict = None):
+    """
+    Inserta una fecha disponible de Sentinel-2 para una geometría dada.
+    
+    Args:
+        geometry_id: hash único que identifica la geometría
+        user_id: ID del usuario que realizó la consulta
+        date: fecha de la imagen (YYYY-MM-DD)
+        system_time_start: timestamp en milisegundos
+        cloud_cover: porcentaje de nubes (0-100)
+        tile_id: MGRS tile identifier
+        roi_geojson: geometría en formato GeoJSON (dict)
+    
+    Returns:
+        int: ID de la fila insertada o None si ya existe (UNIQUE constraint)
+    """
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute('''
+        INSERT OR IGNORE INTO sentinel2_dates(geometry_id, user_id, date, system_time_start, cloud_cover, tile_id, roi_geojson)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            geometry_id,
+            user_id,
+            date,
+            system_time_start,
+            cloud_cover,
+            tile_id,
+            json.dumps(roi_geojson) if roi_geojson is not None else None
+        ))
+        conn.commit()
+        return cur.lastrowid if cur.lastrowid > 0 else None
+    finally:
+        conn.close()
+
+
+def get_sentinel2_dates(geometry_id: str = None, user_id: str = None, start_date: str = None, end_date: str = None, limit: int = 500):
+    """
+    Obtiene fechas de Sentinel-2 almacenadas en BD.
+    
+    Args:
+        geometry_id: filtrar por geometría específica
+        user_id: filtrar por usuario
+        start_date: fecha inicial (YYYY-MM-DD)
+        end_date: fecha final (YYYY-MM-DD)
+        limit: máximo número de resultados
+    
+    Returns:
+        List[dict]: lista de fechas con metadata
+    """
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        q = 'SELECT * FROM sentinel2_dates'
+        clauses = []
+        params = []
+        if geometry_id:
+            clauses.append('geometry_id = ?')
+            params.append(geometry_id)
+        if user_id:
+            clauses.append('user_id = ?')
+            params.append(user_id)
+        if start_date:
+            clauses.append('date >= ?')
+            params.append(start_date)
+        if end_date:
+            clauses.append('date <= ?')
+            params.append(end_date)
+        if clauses:
+            q += ' WHERE ' + ' AND '.join(clauses)
+        q += ' ORDER BY date DESC LIMIT ?'
+        params.append(limit)
+        cur.execute(q, tuple(params))
+        rows = cur.fetchall()
+        results = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d['roi_geojson'] = json.loads(d['roi_geojson']) if d.get('roi_geojson') else None
+            except Exception:
+                d['roi_geojson'] = d.get('roi_geojson')
+            results.append(d)
+        return results
+    finally:
+        conn.close()
+
 
 # insert_asset, get_asset, list_assets, insert_measurement should be copied from original db.py as needed

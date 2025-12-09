@@ -1,12 +1,11 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException
 from services.db import list_measurements, get_measurement
-from routes.auth import get_current_user
 
 router = APIRouter()
 
 
 @router.get('/measurements')
-def measurements_list(plot_id: str = None, metric_type: str = None, limit: int = 500, current_user: dict = Depends(get_current_user)):
+def measurements_list(plot_id: str = None, metric_type: str = None, limit: int = 500):
     try:
         results = list_measurements(plot_id=plot_id, metric_type=metric_type, limit=limit)
         # Devolver solo las fechas y metric_id para construir el calendario
@@ -17,7 +16,7 @@ def measurements_list(plot_id: str = None, metric_type: str = None, limit: int =
 
 
 @router.get('/measurements/{metric_id}')
-def measurement_get(metric_id: str, current_user: dict = Depends(get_current_user)):
+def measurement_get(metric_id: str):
     try:
         m = get_measurement(metric_id)
         if not m:

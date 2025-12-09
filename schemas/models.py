@@ -17,6 +17,7 @@ class ComputeRequest(BaseModel):
     index: Literal["rgb", "ndvi", "ndwi", "evi", "savi", "gci", "vegetation_health", "water_detection", "urban_index", "soil_moisture", "change_detection", "ndmi", "ndre", "lai", "soil_ph"] = "rgb"
     cloud_pct: Optional[int] = 30  # Para Alpha Earth heatmaps
     export_format: Optional[Literal['png', 'geotiff', 'csv']] = None  # Si se pide, exportar el heatmap/serie (png, geotiff, csv)
+    split_kml: Optional[bool] = False  # Si true y la geometría es FeatureCollection (o kml_id apunta a FC), procesar por feature
 
 class TimeSeriesRequest(BaseModel):
     geometry: Optional[dict] = None  # GeoJSON geometry

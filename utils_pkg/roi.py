@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import ee
 from config import BASE_OUTPUT_DIR
+import json
 
 
 def meters_to_degrees(lon, lat, width_m, height_m):
@@ -148,3 +149,55 @@ def get_roi_from_request(req):
         raise ValueError('No ROI provided (kml_id, geometry, or lon/lat needed)')
     except Exception:
         raise
+
+
+def split_feature_collection(fc: dict):
+    """Divide un GeoJSON FeatureCollection en una lista de features con metadatos útiles.
+
+    Retorna lista de dicts: { 'id': str, 'name': Optional[str], 'geometry': dict, 'properties': dict, 'area_m2': Optional[float] }
+    Intenta calcular el area en metros cuadrados usando Earth Engine; si falla, deja area_m2 en None.
+    """
+    out = []
+    if not fc:
+        return out
+    features = fc.get('features') if isinstance(fc, dict) else None
+    if not features:
+        return out
+    for i, feat in enumerate(features):
+        try:
+            feat_id = feat.get('id') or feat.get('properties', {}).get('id') or feat.get('properties', {}).get('name') or f'feature_{i+1}'
+            props = feat.get('properties', {}) or {}
+            name = props.get('name') or props.get('title') or None
+            geom = feat.get('geometry')
+            area_m2 = None
+            if geom:
+                try:
+                    g = ee.Geometry(geom)
+                    # usar area() geodesic
+                    area_m2 = float(g.area().getInfo())
+                except Exception:
+                    # fallback: intentar calcular area por bounds aproximado
+                    try:
+                        coords = None
+                        if geom.get('type') == 'Polygon':
+                            coords = geom.get('coordinates', [[]])[0]
+                        elif geom.get('type') == 'MultiPolygon':
+                            coords = [pt for poly in geom.get('coordinates', []) for pt in poly[0]]
+                        if coords:
+                            lons = [c[0] for c in coords]
+                            lats = [c[1] for c in coords]
+                            width_deg = max(lons) - min(lons)
+                            height_deg = max(lats) - min(lats)
+                            # aproximación: 1 deg lat ~ 111.32 km, lon depends on lat
+                            avg_lat = sum(lats) / len(lats) if lats else 0
+                            meters_per_deg_lat = 111320.0
+                            meters_per_deg_lon = 111320.0 * math.cos(math.radians(avg_lat)) if avg_lat else 111320.0
+                            approx_m2 = (width_deg * meters_per_deg_lon) * (height_deg * meters_per_deg_lat)
+                            area_m2 = float(abs(approx_m2))
+                    except Exception:
+                        area_m2 = None
+            out.append({'id': str(feat_id), 'name': name, 'geometry': geom, 'properties': props, 'area_m2': area_m2})
+        except Exception:
+            # skip malformed feature but keep iteration
+            continue
+    return out

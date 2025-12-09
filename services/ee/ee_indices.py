@@ -21,7 +21,7 @@ def compute_sentinel2_index(roi, start, end, index, cloud_pct=30):
 
     # Build a robust median composite; fallback to first() if median fails
     try:
-        composite = collection.median().clip(roi)
+        composite = collection.mean().clip(roi)
     except Exception:
         try:
             composite = collection.first().clip(roi)

@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException, Depends
-from auth import get_current_user_optional
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 from schemas.models import ComputeRequest, ComputeResponse
 from services.ee.ee_client import compute_sentinel2_index, get_sentinel2_time_series
 from config import BASE_OUTPUT_DIR
 from utils_pkg import ensure_outputs_dir, timestamped_base
+import json
 import ee
 from pathlib import Path
 import requests
@@ -19,9 +20,198 @@ router = APIRouter()
 
 
 @router.post('/compute', response_model=ComputeResponse)
-def compute(req: ComputeRequest, current_user: dict = Depends(get_current_user_optional)):
+def compute(req: ComputeRequest):
     # Manejo explícito de errores: re-lanzar HTTPException para que FastAPI devuelva el código correcto
     try:
+        # Si se solicitó procesar por feature (split_kml), usamos un patrón "master composite + recortes"
+        if getattr(req, 'split_kml', False):
+            fc = None
+            # 1) kml_id apunta a un geojson guardado
+            if getattr(req, 'kml_id', None):
+                geojson_path = Path(BASE_OUTPUT_DIR) / 'kml_uploads' / f"{req.kml_id}.geojson"
+                if geojson_path.exists():
+                    with open(geojson_path, 'r', encoding='utf-8') as fh:
+                        try:
+                            fc = json.load(fh)
+                        except Exception:
+                            fc = None
+            # 2) geometry es una FeatureCollection
+            if not fc and getattr(req, 'geometry', None) and isinstance(req.geometry, dict) and req.geometry.get('type') == 'FeatureCollection':
+                fc = req.geometry
+            # 3) si se envió KML raw, parsearlo
+            if not fc and getattr(req, 'kml', None):
+                try:
+                    from services.ee.ee_client import parse_kml_to_geojson
+                    res = parse_kml_to_geojson(req.kml)
+                    if res and res.get('success'):
+                        fc = {'type': 'FeatureCollection', 'features': res.get('features', [])}
+                except Exception:
+                    fc = None
+
+            if not fc:
+                raise HTTPException(status_code=400, detail='split_kml solicitado pero no se encontró FeatureCollection (usar kml_id, geometry FeatureCollection o kml raw)')
+
+            # Calcular bbox/roi maestro a partir de todas las features
+            all_coords = []
+            for feat in (fc.get('features') or []):
+                geom = feat.get('geometry') or {}
+                t = geom.get('type')
+                coords = geom.get('coordinates')
+                try:
+                    if t == 'Polygon':
+                        ring = coords[0]
+                        all_coords.extend(ring)
+                    elif t == 'MultiPolygon':
+                        for poly in coords:
+                            ring = poly[0]
+                            all_coords.extend(ring)
+                except Exception:
+                    continue
+            if not all_coords:
+                raise HTTPException(status_code=400, detail='FeatureCollection sin coordenadas válidas')
+            lons = [c[0] for c in all_coords]
+            lats = [c[1] for c in all_coords]
+            master_bbox = [min(lons), min(lats), max(lons), max(lats)]
+            master_roi = ee.Geometry.Rectangle(master_bbox)
+
+            # Build master composite once (avoid recomposition per feature)
+            from utils_pkg import index_band_and_vis, make_cache_key, load_mapid, save_mapid, split_feature_collection
+            band, vis = index_band_and_vis(req.index, satellite='sentinel2')
+
+            # Cache key uses index, date range, cloud_pct and master bbox extent
+            cache_params = {'index': req.index, 'start': req.start, 'end': req.end, 'cloud_pct': getattr(req, 'cloud_pct', 30), 'bbox': master_bbox}
+            cache_key = make_cache_key(cache_params)
+            cache_key = make_cache_key(cache_params)
+            cached = load_mapid(cache_key)
+
+            master_tile = None
+            vis_image = None
+            visualized_on_server = False
+            palette_to_use = None
+            palette_min = None
+            palette_max = None
+
+            # If cached tile template exists, reuse it (no recomposition)
+            if cached and isinstance(cached, dict) and cached.get('tile_url_template'):
+                master_tile = cached.get('tile_url_template')
+
+            # If we don't have a cached tile, build the master composite and visualized image
+            if not master_tile:
+                img = compute_sentinel2_index(master_roi, req.start, req.end, req.index, getattr(req, 'cloud_pct', 30))
+                if img is None:
+                    raise HTTPException(status_code=404, detail='No images for master composition')
+                try:
+                    layer = img.select(band)
+                except Exception:
+                    layer = img
+                
+                # Reproyectar y aplicar resampling bicúbico para mejor calidad visual
+                layer = layer.reproject(crs='EPSG:3857', scale=10).resample('bicubic')
+
+                # Prepare vis_map/palette
+                vis_map = None
+                try:
+                    vis_map = dict(vis) if isinstance(vis, dict) else None
+                except Exception:
+                    vis_map = None
+
+                try:
+                    if isinstance(vis_map, dict) and vis_map.get('palette'):
+                        palette_to_use = list(vis_map.get('palette'))
+                        palette_min = vis_map.get('min')
+                        palette_max = vis_map.get('max')
+                    elif isinstance(vis, dict) and vis.get('palette'):
+                        palette_to_use = list(vis.get('palette'))
+                        palette_min = vis.get('min')
+                        palette_max = vis.get('max')
+                except Exception:
+                    palette_to_use = None
+
+                try:
+                    is_rgb_band = isinstance(band, (list, tuple))
+                except Exception:
+                    is_rgb_band = False
+
+                # Try server-side visualize if palette available
+                try:
+                    if palette_to_use and (not is_rgb_band):
+                        palette_to_use = [str(p) for p in palette_to_use if p]
+                        if not palette_to_use:
+                            palette_to_use = ['#000000', '#ffffff']
+                        if palette_min is None:
+                            palette_min = 0
+                        if palette_max is None:
+                            palette_max = 1
+                        try:
+                            vis_image = layer.visualize(min=palette_min, max=palette_max, palette=palette_to_use)
+                            try:
+                                vis_image = vis_image.toUint8()
+                            except Exception:
+                                pass
+                            visualized_on_server = True
+                        except Exception:
+                            vis_image = layer
+                    else:
+                        vis_image = layer
+                except Exception:
+                    vis_image = layer
+                
+                # Aplicar resampling bicúbico a la imagen visualizada
+                vis_image = vis_image.resample('bicubic')
+
+                # Generate master mapid and cache the tile template
+                try:
+                    if visualized_on_server:
+                        m = vis_image.getMapId({})
+                    else:
+                        if palette_to_use and (not is_rgb_band):
+                            gm = {'min': (palette_min if palette_min is not None else 0), 'max': (palette_max if palette_max is not None else 1), 'palette': palette_to_use}
+                            m = vis_image.getMapId(gm)
+                        else:
+                            getmap_params = vis_map if vis_map else (vis if isinstance(vis, dict) else {})
+                            m = vis_image.getMapId(getmap_params)
+                    master_tile = m['tile_fetcher'].url_format
+                    save_mapid(cache_key, {'tile_url_template': master_tile})
+                except Exception as e:
+                    print('compute: failed to getMapId for master image', e)
+                    raise HTTPException(status_code=500, detail=f'Error generating master tiles: {e}')
+
+            # Now build per-feature results: prefer per-feature clipped mapids (cheap) but if master_tile exists reuse it
+            feats = split_feature_collection(fc)
+            features_results = []
+            for f in feats:
+                try:
+                    geom = f.get('geometry')
+                    feature_result = {'feature_id': f.get('id'), 'feature_name': f.get('name'), 'area_m2': f.get('area_m2')}
+                    # If we have the vis_image in memory we can clip and call getMapId for per-feature tiles
+                    if vis_image is not None:
+                        try:
+                            clipped = vis_image.clip(ee.Geometry(geom))
+                            # use same params as master: if visualized_on_server, empty params
+                            if visualized_on_server:
+                                mm = clipped.getMapId({})
+                            else:
+                                if palette_to_use and (not is_rgb_band):
+                                    gm = {'min': (palette_min if palette_min is not None else 0), 'max': (palette_max if palette_max is not None else 1), 'palette': palette_to_use}
+                                    mm = clipped.getMapId(gm)
+                                else:
+                                    getmap_params = vis_map if vis_map else (vis if isinstance(vis, dict) else {})
+                                    mm = clipped.getMapId(getmap_params)
+                            tile_url = mm['tile_fetcher'].url_format
+                            feature_result['tileUrlTemplate'] = tile_url
+                        except Exception:
+                            # fallback: return master_tile so client can still request tiles for the feature extent
+                            feature_result['tileUrlTemplate'] = master_tile
+                    else:
+                        # No vis_image in memory (we used cached master); return master tile template
+                        feature_result['tileUrlTemplate'] = master_tile
+
+                    features_results.append(feature_result)
+                except Exception as e:
+                    features_results.append({'feature_id': f.get('id'), 'feature_name': f.get('name'), 'area_m2': f.get('area_m2'), 'error': str(e)})
+
+            return {'mode': req.mode, 'index': req.index, 'features': features_results, 'master_tile': master_tile}
+
         # ROI selection logic (kml_id, geometry, lon/lat)
         from utils_pkg import get_roi_from_request
         roi, roi_bounds = get_roi_from_request(req)
@@ -52,6 +242,10 @@ def compute(req: ComputeRequest, current_user: dict = Depends(get_current_user_o
                 tb = traceback.format_exc()
                 print(f"compute: failed to select band '{band}' from image: {e}\n{tb}")
                 raise HTTPException(status_code=500, detail=f"Error selecting band '{band}': {e}")
+            
+            # Reproyectar y aplicar resampling bicúbico para mejor calidad visual
+            # Usar escala de 10m (nativa de Sentinel-2) con resampling bicúbico
+            layer = layer.reproject(crs='EPSG:3857', scale=10).resample('bicubic')
 
             # Prepare visualization parameters. If the vis requests a discrete (classified) palette,
             # build a classified image and create a vis_map that maps classes 0..N to the palette.
@@ -211,6 +405,10 @@ def compute(req: ComputeRequest, current_user: dict = Depends(get_current_user_o
             except Exception as e:
                 print('compute: error while preparing vis_image', e)
                 vis_image = layer
+            
+            # Aplicar resampling bicúbico a la imagen visualizada para suavizar
+            vis_image = vis_image.resample('bicubic')
+            
             # Debug: log visualization decision & maps
             try:
                 print(f"compute: vis_map={vis_map}, visualized_on_server={visualized_on_server}")
@@ -472,3 +670,168 @@ def compute(req: ComputeRequest, current_user: dict = Depends(get_current_user_o
         if log_path:
             msg += f', ver registro en: {str(log_path)}'
         raise HTTPException(status_code=500, detail=msg)
+
+
+@router.post('/stats/kml')
+def stats_from_kml(req: ComputeRequest):
+    """Genera estadísticas descriptivas (min/max/mean/stddev) de varios índices para cada feature
+    en un KML (o FeatureCollection) y devuelve un archivo .txt con los resultados.
+    """
+    try:
+        # 1) localizar FeatureCollection: kml_id, geometry FeatureCollection o kml raw
+        fc = None
+        if getattr(req, 'kml_id', None):
+            geojson_path = Path(BASE_OUTPUT_DIR) / 'kml_uploads' / f"{req.kml_id}.geojson"
+            if geojson_path.exists():
+                with open(geojson_path, 'r', encoding='utf-8') as fh:
+                    try:
+                        fc = json.load(fh)
+                    except Exception:
+                        fc = None
+        if not fc and getattr(req, 'geometry', None) and isinstance(req.geometry, dict) and req.geometry.get('type') == 'FeatureCollection':
+            fc = req.geometry
+        if not fc and getattr(req, 'kml', None):
+            try:
+                from services.ee.ee_client import parse_kml_to_geojson
+                res = parse_kml_to_geojson(req.kml)
+                if res and res.get('success'):
+                    fc = {'type': 'FeatureCollection', 'features': res.get('features', [])}
+            except Exception:
+                fc = None
+
+        if not fc:
+            raise HTTPException(status_code=400, detail='No se encontró FeatureCollection (enviar kml_id, geometry FeatureCollection o kml raw)')
+
+        from utils_pkg import split_feature_collection, ensure_outputs_dir, round_sig, index_band_and_vis
+
+        feats = split_feature_collection(fc)
+        if not feats:
+            raise HTTPException(status_code=400, detail='FeatureCollection sin features válidas')
+
+        indices = ['ndvi','ndwi','ndmi','ndre','evi','savi','lai','gci','vegetation_health','water_detection','urban_index','soil_moisture','change_detection','soil_ph']
+
+        # construir contenido del txt
+        lines = []
+        now_ts = time.strftime('%Y%m%dT%H%M%SZ')
+        header = f"Estadísticas descriptivas por feature - {now_ts}\n"
+        header += f"Periodo: {req.start} -> {req.end}\n\n"
+        lines.append(header)
+
+        for f in feats:
+            fid = f.get('id')
+            fname = f.get('name') or ''
+            area = f.get('area_m2')
+            lines.append(f"Feature: {fid} - {fname} - area_m2: {area}\n")
+            roi = None
+            try:
+                roi = ee.Geometry(f.get('geometry'))
+            except Exception:
+                lines.append('  ERROR: geometría inválida\n')
+                continue
+
+            for idx in indices:
+                try:
+                    img = compute_sentinel2_index(roi, req.start, req.end, idx, getattr(req, 'cloud_pct', 30))
+                    if img is None:
+                        lines.append(f"  {idx}: NO_DATA\n")
+                        continue
+                    # determinar banda objetivo
+                    try:
+                        band_name, _ = index_band_and_vis(idx, satellite='sentinel2')
+                        if isinstance(band_name, (list, tuple)):
+                            band_name = band_name[0]
+                    except Exception:
+                        band_name = None
+
+                    if band_name:
+                        try:
+                            reducer = ee.Reducer.mean().combine(ee.Reducer.min(), None, True).combine(ee.Reducer.max(), None, True).combine(ee.Reducer.stdDev(), None, True)
+                            rr = img.select([band_name]).reduceRegion(reducer, geometry=roi, scale=10, maxPixels=1e9, bestEffort=True)
+                            stats_info = rr.getInfo() if rr else None
+                        except Exception:
+                            stats_info = None
+                    else:
+                        stats_info = None
+
+                    if not stats_info:
+                        lines.append(f"  {idx}: STATS_UNAVAILABLE\n")
+                        continue
+
+                    # extraer valores con robustez
+                    mean_val = None
+                    min_val = None
+                    max_val = None
+                    stddev_val = None
+                    try:
+                        mean_val = stats_info.get(f"{band_name}_mean") if isinstance(stats_info, dict) else None
+                    except Exception:
+                        mean_val = None
+                    if mean_val is None:
+                        mean_val = stats_info.get('mean') or stats_info.get(band_name)
+                    try:
+                        min_val = stats_info.get(f"{band_name}_min") if isinstance(stats_info, dict) else None
+                    except Exception:
+                        min_val = None
+                    if min_val is None:
+                        min_val = stats_info.get('min')
+                    try:
+                        max_val = stats_info.get(f"{band_name}_max") if isinstance(stats_info, dict) else None
+                    except Exception:
+                        max_val = None
+                    if max_val is None:
+                        max_val = stats_info.get('max')
+                    try:
+                        stddev_val = stats_info.get(f"{band_name}_stdDev") if isinstance(stats_info, dict) else None
+                    except Exception:
+                        stddev_val = None
+                    if stddev_val is None:
+                        stddev_val = stats_info.get('stdDev')
+
+                    # coerción a float y redondeo
+                    try:
+                        mean_f = float(mean_val) if mean_val is not None else None
+                    except Exception:
+                        mean_f = None
+                    try:
+                        min_f = float(min_val) if min_val is not None else None
+                    except Exception:
+                        min_f = None
+                    try:
+                        max_f = float(max_val) if max_val is not None else None
+                    except Exception:
+                        max_f = None
+                    try:
+                        std_f = float(stddev_val) if stddev_val is not None else None
+                    except Exception:
+                        std_f = None
+
+                    try:
+                        mean_r = round_sig(mean_f, sig=3) if mean_f is not None else None
+                        min_r = round_sig(min_f, sig=3) if min_f is not None else None
+                        max_r = round_sig(max_f, sig=3) if max_f is not None else None
+                        std_r = round_sig(std_f, sig=3) if std_f is not None else None
+                    except Exception:
+                        mean_r, min_r, max_r, std_r = mean_f, min_f, max_f, std_f
+
+                    lines.append(f"  {idx}: mean={mean_r}, min={min_r}, max={max_r}, stddev={std_r}\n")
+                except Exception as e:
+                    lines.append(f"  {idx}: ERROR: {str(e)}\n")
+
+            lines.append('\n')
+
+        # Guardar archivo en outputs
+        ensure_outputs_dir()
+        fname = f"compute_stats_all_indices_{(req.kml_id if getattr(req, 'kml_id', None) else now_ts)}.txt"
+        out_path = Path(BASE_OUTPUT_DIR) / fname
+        try:
+            with open(out_path, 'w', encoding='utf-8') as fh:
+                fh.writelines(lines)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f'Error guardando archivo: {e}')
+
+        return FileResponse(str(out_path), media_type='text/plain', filename=fname)
+    except HTTPException:
+        raise
+    except Exception as ex:
+        print('stats_from_kml error', ex)
+        raise HTTPException(status_code=500, detail=str(ex))
