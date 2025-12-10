@@ -44,24 +44,14 @@ def get_heatmap(req: HeatmapRequest):
             
             # Convertir a ee.Geometry
             roi_geojson = geom
-            if geom['type'] == 'Polygon':
-                coords = geom['coordinates'][0]
-                lons = [c[0] for c in coords]
-                lats = [c[1] for c in coords]
-                roi = ee.Geometry.Rectangle([min(lons), min(lats), max(lons), max(lats)])
-            else:
-                roi = ee.Geometry(geom)
+            # Usar el polígono exacto, no un rectángulo
+            roi = ee.Geometry(geom)
         
         # Opción 2: geometry GeoJSON
         elif req.geometry:
             roi_geojson = req.geometry
-            if req.geometry['type'] == 'Polygon':
-                coords = req.geometry['coordinates'][0]
-                lons = [c[0] for c in coords]
-                lats = [c[1] for c in coords]
-                roi = ee.Geometry.Rectangle([min(lons), min(lats), max(lons), max(lats)])
-            else:
-                roi = ee.Geometry(req.geometry)
+            # Usar el polígono exacto, no un rectángulo
+            roi = ee.Geometry(req.geometry)
         
         # Opción 3: lat/lon con bbox
         elif req.lon is not None and req.lat is not None:
@@ -91,6 +81,11 @@ def get_heatmap(req: HeatmapRequest):
         # Calcular rango de fechas basado en days_buffer
         target_date = datetime.strptime(req.date, "%Y-%m-%d")
         days_buffer = req.days_buffer or 0
+        
+        # Si days_buffer es 0 (un solo día), usar un buffer de 3 días para composite más sólido
+        if days_buffer == 0:
+            days_buffer = 3
+            print(f"Día único solicitado, usando buffer de ±{days_buffer} días para composite más sólido")
         
         # Agregar 1 día al final para incluir el día completo
         start_date = (target_date - timedelta(days=days_buffer)).strftime("%Y-%m-%d")
@@ -179,6 +174,9 @@ def get_heatmap(req: HeatmapRequest):
         else:
             # RGB o sin paleta
             vis_img = layer.visualize(**vis) if vis else layer
+        
+        # Recortar al polígono exacto para que solo se vea la parcela
+        vis_img = vis_img.clip(roi)
         
         # Obtener map ID y tile URL
         map_id_dict = vis_img.getMapId()
