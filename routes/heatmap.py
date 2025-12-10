@@ -24,6 +24,10 @@ def get_heatmap(req: HeatmapRequest):
     Retorna URL de tiles para visualizar el heatmap en un mapa interactivo.
     """
     try:
+        print(f"=== Iniciando generación de heatmap ===")
+        print(f"Request: date={req.date}, index={req.index}, cloud_pct={req.cloud_pct}, days_buffer={req.days_buffer}")
+        print(f"Geometría: kml_id={req.kml_id}, geometry={req.geometry is not None}, lon/lat={req.lon}/{req.lat}")
+        
         roi = None
         roi_geojson = None
         
@@ -235,8 +239,15 @@ def get_heatmap(req: HeatmapRequest):
         )
         
     except ValueError as e:
+        print(f"ERROR ValueError en heatmap: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=400, detail=str(e))
-    except HTTPException:
+    except HTTPException as e:
+        print(f"ERROR HTTPException en heatmap: {e.status_code} - {e.detail}")
         raise
     except Exception as e:
+        print(f"ERROR inesperado en heatmap: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error al generar heatmap: {str(e)}")
