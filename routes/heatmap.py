@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from schemas.heatmap_models import HeatmapRequest, HeatmapResponse
-from services.ee.ee_client import compute_sentinel2_index
+from services.ee.ee_client import compute_sentinel2_index, get_sentinel2_time_series
 from utils_pkg import index_band_and_vis
 import ee
 import json
@@ -80,11 +80,14 @@ def get_heatmap(req: HeatmapRequest):
         
         # Calcular rango de fechas basado en days_buffer
         target_date = datetime.strptime(req.date, "%Y-%m-%d")
-        days_buffer = req.days_buffer or 0
+        days_buffer_original = req.days_buffer or 0
+        days_buffer = days_buffer_original
         
         # Si days_buffer es 0 (un solo día), usar un buffer de 3 días para composite más sólido
+        generate_time_series = False
         if days_buffer == 0:
             days_buffer = 3
+            generate_time_series = True
             print(f"Día único solicitado, usando buffer de ±{days_buffer} días para composite más sólido")
         
         # Agregar 1 día al final para incluir el día completo
@@ -197,6 +200,27 @@ def get_heatmap(req: HeatmapRequest):
             }
         }
         
+        # Generar serie temporal de 10 días si se solicitó un solo día
+        time_series = None
+        if generate_time_series:
+            try:
+                # Rango de 10 días: 5 días antes y 5 días después del día central
+                series_start = (target_date - timedelta(days=5)).strftime("%Y-%m-%d")
+                series_end = (target_date + timedelta(days=5)).strftime("%Y-%m-%d")
+                
+                print(f"Generando serie temporal de 10 días: {series_start} a {series_end}")
+                time_series = get_sentinel2_time_series(
+                    roi=roi,
+                    start=series_start,
+                    end=series_end,
+                    index=req.index,
+                    cloud_pct=req.cloud_pct or 30
+                )
+                print(f"Serie temporal generada: {len(time_series)} puntos")
+            except Exception as e:
+                print(f"Warning: no se pudo generar serie temporal: {e}")
+                time_series = None
+        
         return HeatmapResponse(
             success=True,
             message=f"Heatmap generado para {req.date} ({req.index})",
@@ -206,7 +230,8 @@ def get_heatmap(req: HeatmapRequest):
             tile_url=tile_url,
             map_id=map_id_dict['mapid'],
             bounds=bounds,
-            stats=stats
+            stats=stats,
+            time_series=time_series
         )
         
     except ValueError as e:

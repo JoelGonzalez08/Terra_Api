@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 
 
 class HeatmapRequest(BaseModel):
@@ -31,3 +31,4 @@ class HeatmapResponse(BaseModel):
     map_id: str  # ID del mapa en Earth Engine
     bounds: dict  # bbox para centrar el mapa
     stats: Optional[dict] = None  # estadísticas del índice (min, max, mean, etc.)
+    time_series: Optional[List[dict]] = None  # serie temporal de 10 días (solo cuando days_buffer=0)
